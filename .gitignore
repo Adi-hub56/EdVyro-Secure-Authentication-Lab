@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+app/auth.db
+cookies.txt
+newcookies.txt
+*cookies*.txt
+.DS_Store
