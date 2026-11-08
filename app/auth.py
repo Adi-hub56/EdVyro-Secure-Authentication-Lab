@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import secrets
@@ -16,17 +17,31 @@ app = Flask(__name__)
 app.config["SESSION_COOKIE_NAME"] = "auth_session"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = False
+# Local HTTP lab default. Set COOKIE_SECURE=true behind HTTPS in production.
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 SESSION_LIFETIME = timedelta(minutes=15)
 bcrypt = Bcrypt(app)
-
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
+
+
+@app.after_request
+def add_security_headers(response):
+    """Apply conservative headers suitable for this JSON-only demonstration API."""
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    return response
+
 
 def get_db():
     connection = sqlite3.connect(DATABASE)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
 
 def init_db():
     connection = get_db()
@@ -41,37 +56,49 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sessions (
             token_hash TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
+            csrf_token TEXT,
             expires_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
+    # Safe migration for databases created by the earlier lab version.
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(sessions)")}
+    if "csrf_token" not in columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
+    # Existing sessions cannot satisfy the new CSRF check; revoke them on upgrade.
+    connection.execute("DELETE FROM sessions WHERE csrf_token IS NULL")
     connection.commit()
     connection.close()
+
 
 def valid_username(username):
     return isinstance(username, str) and re.fullmatch(
         r"[A-Za-z0-9_.-]{3,30}", username
     ) is not None
 
+
 def valid_password(password):
     return isinstance(password, str) and 8 <= len(password) <= 128
 
+
 def hash_session_token(token):
-    import hashlib
-    return hashlib.sha256(token.encode()).hexdigest()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
 
 def create_session(user_id):
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
     token_hash = hash_session_token(token)
     expires_at = datetime.now(timezone.utc) + SESSION_LIFETIME
     connection = get_db()
     connection.execute(
-        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-        (token_hash, user_id, expires_at.isoformat())
+        "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)",
+        (token_hash, user_id, csrf_token, expires_at.isoformat())
     )
     connection.commit()
     connection.close()
-    return token
+    return token, csrf_token
+
 
 def get_authenticated_user():
     token = request.cookies.get(app.config["SESSION_COOKIE_NAME"])
@@ -81,7 +108,7 @@ def get_authenticated_user():
     token_hash = hash_session_token(token)
     connection = get_db()
     session_record = connection.execute(
-        """SELECT sessions.user_id, sessions.expires_at, users.username
+        """SELECT sessions.user_id, sessions.expires_at, sessions.csrf_token, users.username
            FROM sessions JOIN users ON users.id = sessions.user_id
            WHERE sessions.token_hash = ?""",
         (token_hash,)
@@ -102,12 +129,16 @@ def get_authenticated_user():
     return {
         "user_id": session_record["user_id"],
         "username": session_record["username"],
-        "token_hash": token_hash
+        "token_hash": token_hash,
+        "csrf_token": session_record["csrf_token"]
     }
+
 
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     username = data.get("username")
     password = data.get("password")
 
@@ -116,7 +147,6 @@ def register():
 
     password_hash = bcrypt.generate_password_hash(password).decode("utf-8")
     connection = get_db()
-
     try:
         connection.execute(
             "INSERT INTO users (username, password_hash) VALUES (?, ?)",
@@ -130,10 +160,13 @@ def register():
     connection.close()
     return jsonify({"message": "Registration successful"}), 201
 
+
 @app.route("/login", methods=["POST"])
 @limiter.limit("5 per minute")
 def login():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     username = data.get("username")
     password = data.get("password")
 
@@ -150,7 +183,7 @@ def login():
     if not user or not bcrypt.check_password_hash(user["password_hash"], password):
         return jsonify({"error": "Invalid username or password"}), 401
 
-    token = create_session(user["id"])
+    token, csrf_token = create_session(user["id"])
     response = make_response(jsonify({"message": "Login successful"}))
     response.set_cookie(
         app.config["SESSION_COOKIE_NAME"],
@@ -158,30 +191,51 @@ def login():
         httponly=True,
         secure=app.config["SESSION_COOKIE_SECURE"],
         samesite=app.config["SESSION_COOKIE_SAMESITE"],
-        max_age=int(SESSION_LIFETIME.total_seconds())
+        max_age=int(SESSION_LIFETIME.total_seconds()),
+        path="/"
     )
     return response, 200
+
 
 @app.route("/profile", methods=["GET"])
 def profile():
     user = get_authenticated_user()
     if not user:
         return jsonify({"error": "Authentication required"}), 401
-    return jsonify({"username": user["username"], "authenticated": True}), 200
+    response = jsonify({
+        "username": user["username"],
+        "authenticated": True,
+        "csrf_token": user["csrf_token"]
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
 
 @app.route("/logout", methods=["POST"])
 def logout():
-    token = request.cookies.get(app.config["SESSION_COOKIE_NAME"])
-    if token:
-        token_hash = hash_session_token(token)
-        connection = get_db()
-        connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
-        connection.commit()
-        connection.close()
+    user = get_authenticated_user()
+    if not user:
+        return jsonify({"error": "Authentication required"}), 401
+
+    supplied_csrf = request.headers.get("X-CSRF-Token", "")
+    if not secrets.compare_digest(supplied_csrf, user["csrf_token"] or ""):
+        return jsonify({"error": "CSRF validation failed"}), 403
+
+    connection = get_db()
+    connection.execute("DELETE FROM sessions WHERE token_hash = ?", (user["token_hash"],))
+    connection.commit()
+    connection.close()
 
     response = make_response(jsonify({"message": "Logged out"}))
-    response.delete_cookie(app.config["SESSION_COOKIE_NAME"])
+    response.delete_cookie(
+        app.config["SESSION_COOKIE_NAME"],
+        path="/",
+        httponly=True,
+        secure=app.config["SESSION_COOKIE_SECURE"],
+        samesite=app.config["SESSION_COOKIE_SAMESITE"]
+    )
     return response, 200
+
 
 if __name__ == "__main__":
     init_db()
