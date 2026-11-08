@@ -2,9 +2,9 @@
 
 **Updated:** 2026-11-08  
 **Repository:** EdVyro Secure Authentication Lab  
-**Status:** Code and test assets committed; runtime verification pending.
+**Status:** Automated CI regression workflow passed; manual runtime evidence remains outstanding.
 
-## Work completed in the repository
+## Work completed
 
 - Added CSRF token generation and validation for logout.
 - Added defensive response headers and no-store caching.
@@ -12,31 +12,39 @@
 - Added SQLite foreign-key enforcement and a session-table migration.
 - Expanded regression tests for CSRF, session revocation, malformed JSON, and headers.
 - Added GitHub Actions CI to run pytest on pushes and pull requests.
-- Added `workflow_dispatch` so the workflow can also be started manually.
-- Configured the workflow to publish a JUnit XML test-result artifact.
+- Added `workflow_dispatch` for manual runs.
+- Configured JUnit XML test-result artifact upload.
 
-## Verification attempts from the assistant environment
+## GitHub Actions verification
 
-| Check | Result | Notes |
-|---|---|---|
-| Clone repository to run pytest | Blocked | Environment could not resolve `github.com` (DNS/network unavailable). |
-| Check Python dependencies | Blocked | `flask`, `flask_bcrypt`, and `flask_limiter` are not installed in this environment. |
-| Inspect GitHub Actions run for the workflow commit | No run returned | No workflow run was available to verify at the time of this update. |
-| Source and test files on GitHub | Confirmed present | Files were fetched from the repository after commit. |
+The repository owner's GitHub Actions screenshot captured on 2026-11-08 shows:
 
-**No test pass is claimed here.** A test suite being committed is not evidence that it passed.
+| Workflow run | Commit | Status | Interpretation |
+|---|---|---|---|
+| Security lab tests #1 | `dda379b` | Success (green check) | Initial pytest workflow completed successfully |
+| Security lab tests #2 | `fefba7d` | Success (green check) | Updated workflow with JUnit artifact configuration completed successfully |
+| Security lab tests #3 | `3e80721` | In progress at screenshot time | Documentation-only verification-status update; final result not yet observed |
 
-## How to complete the runtime verification
+The green workflow results establish that the automated CI jobs completed successfully for the code present in those runs. The latest documentation-only run was still running when the screenshot was taken; its final status should be checked separately.
 
-1. Open the repository's **Actions** tab.
-2. Select **Security lab tests**.
-3. Choose **Run workflow** on the `main` branch.
-4. Wait for the run to complete.
-5. Confirm the `pytest` job is green.
-6. Download the `pytest-results` artifact and retain it as evidence.
-7. If the run fails, open the job logs, fix the issue, push a correction, and rerun.
+## What is not yet independently evidenced
 
-## Local alternative
+- A separate manual HTTP/API retest with sanitized request and response captures.
+- A downloaded and retained JUnit XML artifact from run #2.
+- Final completion status for run #3.
+
+Do not represent manual testing as completed unless it is actually performed and captured.
+
+## Manual evidence checklist
+
+- [ ] Capture sanitized successful login and authenticated profile responses.
+- [ ] Capture logout without CSRF header returning 403.
+- [ ] Capture logout with valid CSRF header returning 200.
+- [ ] Capture replay of the revoked session returning 401.
+- [ ] Capture the rate-limit sequence (five 401 responses followed by 429).
+- [ ] Remove all passwords, cookies, CSRF tokens, and personal data from evidence.
+
+## Local retest command
 
 ```bash
 python3 -m venv .venv
@@ -45,8 +53,6 @@ pip install -r requirements.txt
 pytest -q --junitxml=test-results.xml
 ```
 
-Use only synthetic credentials and the local application. Redact session cookies, CSRF tokens, passwords, and any personal data from screenshots or logs.
-
 ## Submission note
 
-The public repository contains the assessment report, remediation log, retest plan, source changes, regression tests, and CI workflow. The only outstanding evidence item is a successful actual test run and sanitized runtime retest output.
+The repository contains the assessment report, remediation log, retest plan, source changes, regression tests, and CI workflow. Automated GitHub Actions verification has passed in runs #1 and #2. Manual runtime evidence remains a separate optional strengthening of the capstone submission.
