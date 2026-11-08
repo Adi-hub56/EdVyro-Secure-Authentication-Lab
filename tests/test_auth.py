@@ -1,15 +1,17 @@
 import pytest
 from app import auth
 
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     test_db = tmp_path / "test.db"
     monkeypatch.setattr(auth, "DATABASE", str(test_db))
-    auth.app.config.update(TESTING=True)
+    auth.app.config.update(TESTING=True, SESSION_COOKIE_SECURE=False)
     auth.init_db()
     auth.limiter.reset()
     with auth.app.test_client() as client:
         yield client
+
 
 def register_user(client):
     return client.post("/register", json={
@@ -17,16 +19,24 @@ def register_user(client):
         "password": "TestPassword123!"
     })
 
+
 def login_user(client):
     return client.post("/login", json={
         "username": "testuser",
         "password": "TestPassword123!"
     })
 
+
 def test_registration(client):
     response = register_user(client)
     assert response.status_code == 201
     assert response.get_json()["message"] == "Registration successful"
+
+
+def test_malformed_json_shapes_are_rejected_safely(client):
+    assert client.post("/register", json=["unexpected"]).status_code == 400
+    assert client.post("/login", json=["unexpected"]).status_code == 401
+
 
 def test_password_is_hashed(client):
     register_user(client)
@@ -39,6 +49,7 @@ def test_password_is_hashed(client):
     assert user["password_hash"] != "TestPassword123!"
     assert user["password_hash"].startswith("$2")
 
+
 def test_successful_login(client):
     register_user(client)
     response = login_user(client)
@@ -49,6 +60,7 @@ def test_successful_login(client):
     assert "SameSite=Lax" in cookie
     assert "Max-Age=900" in cookie
 
+
 def test_wrong_password_returns_generic_error(client):
     register_user(client)
     response = client.post("/login", json={
@@ -58,29 +70,50 @@ def test_wrong_password_returns_generic_error(client):
     assert response.status_code == 401
     assert response.get_json()["error"] == "Invalid username or password"
 
+
 def test_profile_requires_authentication(client):
     response = client.get("/profile")
     assert response.status_code == 401
     assert response.get_json()["error"] == "Authentication required"
 
-def test_authenticated_profile(client):
+
+def test_authenticated_profile_returns_csrf_token(client):
     register_user(client)
-    login_response = login_user(client)
-    cookie = login_response.headers["Set-Cookie"].split(";", 1)[0]
-    response = client.get("/profile", headers={"Cookie": cookie})
+    login_user(client)
+    response = client.get("/profile")
     assert response.status_code == 200
-    assert response.get_json()["authenticated"] is True
-    assert response.get_json()["username"] == "testuser"
+    body = response.get_json()
+    assert body["authenticated"] is True
+    assert body["username"] == "testuser"
+    assert len(body["csrf_token"]) >= 32
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_logout_rejects_missing_or_invalid_csrf_token(client):
+    register_user(client)
+    login_user(client)
+    assert client.post("/logout").status_code == 403
+    assert client.post("/logout", headers={"X-CSRF-Token": "wrong"}).status_code == 403
+    assert client.get("/profile").status_code == 200
+
 
 def test_logout_revokes_session(client):
     register_user(client)
-    login_response = login_user(client)
-    cookie = login_response.headers["Set-Cookie"].split(";", 1)[0]
-    logout_response = client.post("/logout", headers={"Cookie": cookie})
+    login_user(client)
+    csrf_token = client.get("/profile").get_json()["csrf_token"]
+    logout_response = client.post("/logout", headers={"X-CSRF-Token": csrf_token})
     assert logout_response.status_code == 200
-    replay_response = client.get("/profile", headers={"Cookie": cookie})
-    assert replay_response.status_code == 401
-    assert replay_response.get_json()["error"] == "Authentication required"
+    assert client.get("/profile").status_code == 401
+
+
+def test_security_headers_are_present(client):
+    response = client.get("/profile")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+
 
 def test_rate_limiting(client):
     register_user(client)
